@@ -38,7 +38,6 @@ class EventHandler(AsyncAssistantEventHandler):
         self.current_step: cl.Step = None
         self.current_tool_call = None
         self.assistant_name = assistant_name
-        #add customized functions. Make sure the keys of function_map are the same names of the functions you registered in openai's system.
         self.function_map={'search_web':self.search_web,
                            'add_two_numbers':self.add_two_numbers}
     
@@ -57,7 +56,6 @@ class EventHandler(AsyncAssistantEventHandler):
     async def on_event(self, event):
       # Retrieve events that are denoted with 'requires_action',since these will have our tool_calls
       if event.event == 'thread.run.requires_action':
-        print("on_event -------->  ",event)
         run_id = event.data.id  # Retrieve the run ID from the event data
         self.current_run.id=run_id
         await self.handle_requires_action(event.data, run_id)
@@ -65,7 +63,6 @@ class EventHandler(AsyncAssistantEventHandler):
 
     async def handle_requires_action(self, data, run_id):
         tool_outputs = []
-        print("handle_requires_action --------> data",data)
         for tool in data.required_action.submit_tool_outputs.tool_calls:
             func_name = tool.function.name
             func_args = tool.function.arguments
@@ -75,19 +72,14 @@ class EventHandler(AsyncAssistantEventHandler):
             
             if func_to_call:
                 try:
-                    print('handle_requires_action------->: func_args: ',func_args)
-                    
                     # Parse the func_args JSON string to a dictionary
                     func_args_dict = json.loads(func_args)
-                    print('handle_requires_action------->: func_args_dict: ',func_args_dict)
                     tool_call_output = func_to_call(**func_args_dict)
                     tool_outputs.append({"tool_call_id": tool.id, "output": tool_call_output})
                 except TypeError as e:
                     print(f"Error calling function {func_name}: {e}")
             else:
                 print(f"Function {func_name} not found")
-            
-        print("handle_requires_action -------->submit_tool_outputs  tool_outputs",tool_outputs)
         # Submit all tool_outputs at the same time
         await self.submit_tool_outputs(tool_outputs, run_id)
 
@@ -96,7 +88,6 @@ class EventHandler(AsyncAssistantEventHandler):
         """
         Submits the tool outputs to the current run.
         """
-        print('submit_tool_outputs started!!!')
         async with async_openai_client.beta.threads.runs.submit_tool_outputs_stream(
             thread_id=self.current_run.thread_id,
             run_id=run_id,
@@ -104,7 +95,7 @@ class EventHandler(AsyncAssistantEventHandler):
             event_handler=EventHandler(assistant_name=self.assistant_name),
         ) as stream:
             await stream.until_done()
-        print('submit_tool_outputs ended!!!')
+
     
 
     async def on_text_created(self, text) -> None:
@@ -147,14 +138,11 @@ class EventHandler(AsyncAssistantEventHandler):
 
 
     async def on_run_step_done(self, run_step: RunStep):
-        print('on_run_step_done, RunStep ----->  ',run_step)
         if run_step.type == 'tool_calls':
             tool_calls = run_step.step_details.tool_calls
 
             # Handle tool call with type 'file_search and output quations to user'
             if any(call.type == 'file_search' for call in tool_calls):
-                print("There is a tool call with type 'file_search' in the tool_calls array.")
-                print('thread_id:  ',cl.user_session.get("thread_id"),'run_id:  ',run_step.run_id,'run_step_id',run_step.id)
                 #retrieve quations from openai by adding parameter include
                 run_step = sync_openai_client.beta.threads.runs.steps.retrieve(
                     thread_id=cl.user_session.get("thread_id"),
@@ -162,32 +150,26 @@ class EventHandler(AsyncAssistantEventHandler):
                     step_id=run_step.id,
                     include=["step_details.tool_calls[*].file_search.results[*].content"]
                     )
-                
                 # Initialize an empty list to hold the citations
                 citations = []
-
                 # Extract tool_calls from run_step.step_details
                 tool_calls = run_step.step_details.tool_calls
-
                 # Iterate through each tool call
                 for call in tool_calls:
                     # Check if the type of the tool call is 'file_search'
                     if call.type == 'file_search':
                         # Extract the file search results from the file_search attribute
                         file_search_results = call.file_search.results
-                        
                         # Iterate through each result in file_search_results
                         for result in file_search_results:
                             # Extract the first content's text for the quote (if available)
                             quote = result.content[0].text if result.content else ""
-                            
                             # Create a citation dictionary
                             citation = {
                                 "file_name": result.file_name,
                                 "score": result.score,
                                 "quote": quote
                             }
-                            
                             # Append the citation dictionary to the citations list
                             citations.append(citation)
 
@@ -215,8 +197,6 @@ class EventHandler(AsyncAssistantEventHandler):
                         except json.JSONDecodeError:
                             # If it's not JSON, treat it as plain text
                             self.current_step.output = func_output
-
-                        print(self.current_step.output)  # For debugging purposes
                         await self.current_step.send()
 
 

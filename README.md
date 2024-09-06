@@ -14,7 +14,7 @@ You can deploy your OpenAI assistant with Chainlit using this template.
 #### How to Use the Function Call Feature
 
 
-![Function Call](PLACEHOLDER_FOR_VIDEO_LINK)
+![openai-assistant-funciton-call](https://github.com/user-attachments/assets/920767aa-29af-493c-a88b-9dd0137c3108)
 
 ---
 
@@ -25,6 +25,55 @@ To implement custom functions with OpenAI's function call feature, follow these 
 1. **Register Your Function**
    - Register your function through the OpenAI API or in the Playground. Ensure that the function names and their parameters are properly defined.
 
+    ```json
+      {
+        "name": "search_web",
+        "description": "search information online",
+        "strict": true,
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "description": "search query for web search"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "query"
+          ]
+        }
+      }
+     ```
+
+     ```json
+      {
+        "name": "add_two_numbers",
+        "description": "add two numbers together",
+        "strict": true,
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "number1": {
+              "type": "integer",
+              "description": "the first number for the addinng operation"
+            },
+            "number2": {
+              "type": "integer",
+              "description": "the second number for the addinng operation"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "number1",
+            "number2"
+          ]
+        }
+      }
+     ```
+
+
+     
 2. **Edit the `function_map` Attribute in the `EventHandler` Class**
    - In the `EventHandler` class, edit the `function_map` attribute like so:
      ```python
