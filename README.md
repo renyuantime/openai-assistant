@@ -5,9 +5,50 @@ You can deploy your OpenAI assistant with Chainlit using this template.
 
 ### Supported Assistant Features
 
-| Streaming | Files | Code Interpreter | File Search | Voice |
-| --------- | ----- | ---------------- | ----------- | ----- |
-| ✅        | ✅    | ✅               | ✅          | ✅    |
+
+| Streaming | Files | Code Interpreter | File Search | Voice | Function Call |
+| --------- | ----- | ---------------- | ----------- | ----- | -------------- |
+| ✅        | ✅    | ✅               | ✅          | ✅    | ✅             |
+
+
+#### How to Use the Function Call Feature
+
+
+![Function Call](PLACEHOLDER_FOR_VIDEO_LINK)
+
+---
+
+#### How to Implement Customized Functions
+
+To implement custom functions with OpenAI's function call feature, follow these steps:
+
+1. **Register Your Function**
+   - Register your function through the OpenAI API or in the Playground. Ensure that the function names and their parameters are properly defined.
+
+2. **Edit the `function_map` Attribute in the `EventHandler` Class**
+   - In the `EventHandler` class, edit the `function_map` attribute like so:
+     ```python
+     self.function_map = {
+         'search_web': self.search_web,
+         'add_two_numbers': self.add_two_numbers
+     }
+     ```
+   - The **key names** (`'search_web'`, `'add_two_numbers'`) are the **function names** you registered with OpenAI, and they must match **exactly**.
+   - The values (e.g., `self.search_web`, `self.add_two_numbers`) are the actual methods you will implement inside the `EventHandler` class.
+
+3. **Implement the Functions**
+   - Implement the functions that you registered and mapped in the `EventHandler` class. After the 'self' parameter, the parameter names and their count should exactly match the registered function in OpenAI’s system. For example:
+     ```python
+     def search_web(self, query):
+         # Implementation of the search_web function
+         pass
+
+     def add_two_numbers(self, num1, num2):
+         # Implementation of the add_two_numbers function
+         return num1 + num2
+     ```
+
+---
 
 ### Get an OpenAI API key
 
