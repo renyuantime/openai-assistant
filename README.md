@@ -11,7 +11,7 @@ You can deploy your OpenAI assistant with Chainlit using this template.
 | ✅        | ✅    | ✅               | ✅          | ✅    | ✅             |
 
 
-#### How to Use the Function Call Feature
+#### Function Call Feature
 
 
 ![openai-assistant-funciton-call](https://github.com/user-attachments/assets/920767aa-29af-493c-a88b-9dd0137c3108)
