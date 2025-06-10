@@ -5,6 +5,7 @@ from typing import List
 import json
 from typing_extensions import override
 
+import openai # Added import
 from openai import AsyncAssistantEventHandler, AsyncOpenAI, OpenAI
 from openai.types.beta.threads.runs import ToolCall, ToolCallDelta,RunStepDelta,RunStep
 
@@ -17,11 +18,19 @@ from chainlit.element import Element
 async_openai_client = AsyncOpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 sync_openai_client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
-assistant = sync_openai_client.beta.assistants.retrieve(
-    os.environ.get("OPENAI_ASSISTANT_ID")
-)
-
-config.ui.name = assistant.name
+try:
+    assistant = sync_openai_client.beta.assistants.retrieve(
+        os.environ.get("OPENAI_ASSISTANT_ID")
+    )
+    config.ui.name = assistant.name
+except openai.APIError as e:
+    print(f"OpenAI API Error retrieving assistant: {e}. The application may not function correctly.")
+    assistant = None # Ensure assistant is None so later checks can handle it
+    config.ui.name = "Error: Assistant Not Loaded"
+except Exception as e:
+    print(f"Unexpected error retrieving assistant: {e}. The application may not function correctly.")
+    assistant = None
+    config.ui.name = "Error: Assistant Not Loaded"
 
 
 
@@ -76,10 +85,18 @@ class EventHandler(AsyncAssistantEventHandler):
                     func_args_dict = json.loads(func_args)
                     tool_call_output = func_to_call(**func_args_dict)
                     tool_outputs.append({"tool_call_id": tool.id, "output": tool_call_output})
+                except json.JSONDecodeError as e:
+                    print(f"Error processing tool call: {tool.id}, function: {func_name}. Error: {e}")
+                    tool_outputs.append({"tool_call_id": tool.id, "output": f"Error: Could not parse arguments for {func_name}. Details: {e}"})
                 except TypeError as e:
-                    print(f"Error calling function {func_name}: {e}")
+                    print(f"Error processing tool call: {tool.id}, function: {func_name}. Error: {e}")
+                    tool_outputs.append({"tool_call_id": tool.id, "output": f"Error: Invalid arguments for {func_name}. Details: {e}"})
+                except Exception as e:
+                    print(f"Error processing tool call: {tool.id}, function: {func_name}. Error: {e}")
+                    tool_outputs.append({"tool_call_id": tool.id, "output": f"Error: Could not process tool call {func_name}. Details: {e}"})
             else:
                 print(f"Function {func_name} not found")
+                tool_outputs.append({"tool_call_id": tool.id, "output": f"Error: Function {func_name} not found."})
         # Submit all tool_outputs at the same time
         await self.submit_tool_outputs(tool_outputs, run_id)
 
@@ -88,152 +105,267 @@ class EventHandler(AsyncAssistantEventHandler):
         """
         Submits the tool outputs to the current run.
         """
-        async with async_openai_client.beta.threads.runs.submit_tool_outputs_stream(
-            thread_id=self.current_run.thread_id,
-            run_id=run_id,
-            tool_outputs=tool_outputs,
-            event_handler=EventHandler(assistant_name=self.assistant_name),
-        ) as stream:
-            await stream.until_done()
+        try:
+            async with async_openai_client.beta.threads.runs.submit_tool_outputs_stream(
+                thread_id=self.current_run.thread_id,
+                run_id=run_id,
+                tool_outputs=tool_outputs,
+                event_handler=EventHandler(assistant_name=self.assistant_name),
+            ) as stream:
+                await stream.until_done()
+        except openai.APIError as e:
+            print(f"OpenAI API Error submitting tool outputs: {e}")
+            # Hard to send a message back to the user directly here, logging is key.
 
     
 
     async def on_text_created(self, text) -> None:
-        self.current_message = await cl.Message(author=self.assistant_name, content="").send()
+        try:
+            self.current_message = await cl.Message(author=self.assistant_name, content="").send()
+        except Exception as e:
+            print(f"Error in on_text_created: {e}")
+            # Attempt to send an error message if message creation failed
+            await cl.ErrorMessage(content=f"Error creating message: {e}").send()
 
     async def on_text_delta(self, delta, snapshot):
-        await self.current_message.stream_token(delta.value)
+        try:
+            if self.current_message and hasattr(delta, 'value'):
+                await self.current_message.stream_token(delta.value)
+            elif not self.current_message:
+                print("Error in on_text_delta: self.current_message is None. Cannot stream token.")
+        except Exception as e:
+            print(f"Error in on_text_delta: {e}")
+            # Streaming token to a message that might be compromised is risky. Logging is primary.
 
     async def on_text_done(self, text):
-        await self.current_message.update()
-
-
-    async def on_tool_call_delta(self, delta, snapshot): 
-        if snapshot.id != self.current_tool_call:
-            self.current_tool_call = snapshot.id
-            self.current_step = cl.Step(name=delta.type, type="tool")
-            self.current_step.language = "python"
-            self.current_step.start = utc_now()
-            #await self.current_step.send()  
-                 
-        if delta.type == "code_interpreter":
-            if delta.code_interpreter.outputs:
-                for output in delta.code_interpreter.outputs:
-                    if output.type == "logs":
-                        error_step = cl.Step(
-                            name=delta.type,
-                            type="tool"
-                        )
-                        error_step.is_error = True
-                        error_step.output = output.logs
-                        error_step.language = "markdown"
-                        error_step.start = self.current_step.start
-                        error_step.end = utc_now()
-                        await error_step.send()
+        try:
+            if self.current_message:
+                await self.current_message.update()
             else:
-                if delta.code_interpreter.input:
-                    await self.current_step.stream_token(delta.code_interpreter.input)
+                print("Error in on_text_done: self.current_message is None. Cannot update.")
+        except Exception as e:
+            print(f"Error in on_text_done: {e}")
+            # If current_message exists, try to set its content to an error message.
+            if self.current_message:
+                self.current_message.content = f"Error finalizing message: {e}"
+                try:
+                    await self.current_message.update()
+                except Exception as update_e:
+                    print(f"Error updating message with error state: {update_e}")
+            else:
+                await cl.ErrorMessage(content=f"Error finalizing message: {e}").send()
+
+    async def on_tool_call_delta(self, delta, snapshot):
+        try:
+            if hasattr(snapshot, 'id') and snapshot.id != self.current_tool_call :
+                self.current_tool_call = snapshot.id
+                # Ensure delta.type exists before creating Step
+                step_name = delta.type if hasattr(delta, 'type') else "tool_call"
+                self.current_step = cl.Step(name=step_name, type="tool")
+                self.current_step.language = "python" # Default, can be overridden
+                self.current_step.start = utc_now()
+                # Not sending the step immediately: await self.current_step.send()
+
+            if hasattr(delta, 'type') and delta.type == "code_interpreter":
+                if hasattr(delta, 'code_interpreter') and delta.code_interpreter:
+                    if delta.code_interpreter.outputs:
+                        for output in delta.code_interpreter.outputs:
+                            if hasattr(output, 'type') and output.type == "logs":
+                                # Ensure self.current_step exists from the initial part of the method
+                                if not self.current_step:
+                                    print("Error in on_tool_call_delta: self.current_step is None when processing logs.")
+                                    # Create a generic step if needed, though context might be lost
+                                    self.current_step = cl.Step(name="code_interpreter_log_error", type="tool")
+                                    self.current_step.start = utc_now()
 
 
+                                error_step_name = delta.type # or a more specific name
+                                error_step = cl.Step(name=error_step_name,type="tool")
+                                error_step.is_error = True
+                                error_step.output = output.logs if hasattr(output, 'logs') else "Unknown error log"
+                                error_step.language = "markdown"
+                                error_step.start = self.current_step.start if self.current_step and self.current_step.start else utc_now()
+                                error_step.end = utc_now()
+                                await error_step.send()
+                    elif delta.code_interpreter.input:
+                        if self.current_step:
+                            await self.current_step.stream_token(delta.code_interpreter.input)
+                        else:
+                            print("Error in on_tool_call_delta: self.current_step is None. Cannot stream input token.")
+            # Potentially add handling for other delta.type if necessary
+        except Exception as e:
+            print(f"Error in on_tool_call_delta: {e}")
+            # It's hard to show this error in the UI if the step itself is compromised. Logging is crucial.
+            # If a step was being built, try to mark it as error or send a general error.
+            if self.current_step and self.current_step.output is None : # Avoid overwriting existing output
+                 self.current_step.output = f"Error processing tool call delta: {e}"
+                 self.current_step.is_error = True
+                 try:
+                     await self.current_step.update() # or send if not yet sent
+                 except Exception as step_update_e:
+                     print(f"Error updating step with error state in on_tool_call_delta: {step_update_e}")
 
 
     async def on_run_step_done(self, run_step: RunStep):
-        if run_step.type == 'tool_calls':
-            tool_calls = run_step.step_details.tool_calls
+        try:
+            if not hasattr(run_step, 'type') or not hasattr(run_step, 'step_details'):
+                print(f"Error in on_run_step_done: run_step is missing 'type' or 'step_details'. run_step: {run_step}")
+                return
 
-            # Handle tool call with type 'file_search and output quations to user'
-            if any(call.type == 'file_search' for call in tool_calls):
-                #retrieve quations from openai by adding parameter include
-                run_step = sync_openai_client.beta.threads.runs.steps.retrieve(
-                    thread_id=cl.user_session.get("thread_id"),
-                    run_id=run_step.run_id,
-                    step_id=run_step.id,
-                    include=["step_details.tool_calls[*].file_search.results[*].content"]
-                    )
-                # Initialize an empty list to hold the citations
-                citations = []
-                # Extract tool_calls from run_step.step_details
-                tool_calls = run_step.step_details.tool_calls
-                # Iterate through each tool call
-                for call in tool_calls:
-                    # Check if the type of the tool call is 'file_search'
-                    if call.type == 'file_search':
-                        # Extract the file search results from the file_search attribute
-                        file_search_results = call.file_search.results
-                        # Iterate through each result in file_search_results
-                        for result in file_search_results:
-                            # Extract the first content's text for the quote (if available)
-                            quote = result.content[0].text if result.content else ""
-                            # Create a citation dictionary
-                            citation = {
-                                "file_name": result.file_name,
-                                "score": result.score,
-                                "quote": quote
-                            }
-                            # Append the citation dictionary to the citations list
-                            citations.append(citation)
+            if run_step.type == 'tool_calls':
+                tool_calls = run_step.step_details.tool_calls if hasattr(run_step.step_details, 'tool_calls') else []
 
-                # Create the final dictionary with the list of citations
-                citations_dict = {"citations": citations}
-                #Construct step 
-                self.current_step = cl.Step(name=call.type, type="tool")
-                self.current_step.output=citations_dict
-                await self.current_step.send()
-
-            #Handle tool calls that are customized functions and render function input and output to user
-            else:
-                for tool_call in tool_calls:
-                    if hasattr(tool_call, 'function'):
-                        func_name = tool_call.function.name
-                        func_args = tool_call.function.arguments
-                        func_output=tool_call.function.output     
-                        self.current_step = cl.Step(name=func_name, type="tool")
-                        self.current_step.input = json.loads(func_args)
-
-                        # Handle func_output being either JSON string or plain text
-                        try:
-                            # Try to parse func_output as JSON
-                            self.current_step.output = json.loads(func_output)
-                        except json.JSONDecodeError:
-                            # If it's not JSON, treat it as plain text
-                            self.current_step.output = func_output
-                        await self.current_step.send()
+                if any(hasattr(call, 'type') and call.type == 'file_search' for call in tool_calls):
+                    # The sync_openai_client call here could also be wrapped, but it's outside the scope of this subtask's direct client calls.
+                    # For now, focusing on the event handler's robustness.
+                    try:
+                        retrieved_run_step = sync_openai_client.beta.threads.runs.steps.retrieve(
+                            thread_id=cl.user_session.get("thread_id"), # Potential for session errors
+                            run_id=run_step.run_id,
+                            step_id=run_step.id,
+                            include=["step_details.tool_calls[*].file_search.results[*].content"]
+                        )
+                        # Re-assign tool_calls from the retrieved step for fresh details
+                        tool_calls = retrieved_run_step.step_details.tool_calls if hasattr(retrieved_run_step.step_details, 'tool_calls') else []
+                    except openai.APIError as api_e:
+                        print(f"OpenAI API Error retrieving run step details in on_run_step_done: {api_e}")
+                        # Create an error step to inform user if possible
+                        error_step = cl.Step(name="file_search_error", type="tool")
+                        error_step.output = f"Failed to retrieve file search results: {api_e}"
+                        error_step.is_error = True
+                        await error_step.send()
+                        return # Stop further processing for this event
+                    except Exception as e:
+                        print(f"Error retrieving run step details in on_run_step_done: {e}")
+                        # Create an error step
+                        error_step = cl.Step(name="file_search_detail_error", type="tool")
+                        error_step.output = f"Unexpected error retrieving file search details: {e}"
+                        error_step.is_error = True
+                        await error_step.send()
+                        return
 
 
+                    citations = []
+                    last_call_type_for_step_name = "file_search" # Default
+                    for call in tool_calls:
+                        if hasattr(call, 'type') and call.type == 'file_search':
+                            last_call_type_for_step_name = call.type
+                            if hasattr(call, 'file_search') and call.file_search and hasattr(call.file_search, 'results'):
+                                for result in call.file_search.results:
+                                    quote = result.content[0].text if hasattr(result, 'content') and result.content and hasattr(result.content[0], 'text') else ""
+                                    citations.append({
+                                        "file_name": getattr(result, 'file_name', 'Unknown file'),
+                                        "score": getattr(result, 'score', 0),
+                                        "quote": quote
+                                    })
+
+                    citations_dict = {"citations": citations}
+                    self.current_step = cl.Step(name=last_call_type_for_step_name, type="tool")
+                    self.current_step.output = citations_dict
+                    await self.current_step.send()
+
+                else: # Handle other tool calls (e.g. custom functions)
+                    for tool_call in tool_calls:
+                        if hasattr(tool_call, 'function'):
+                            func_name = getattr(tool_call.function, 'name', 'unknown_function')
+                            func_args = getattr(tool_call.function, 'arguments', '{}')
+                            func_output = getattr(tool_call.function, 'output', None)
+
+                            current_tool_step = cl.Step(name=func_name, type="tool")
+                            try:
+                                current_tool_step.input = json.loads(func_args)
+                            except json.JSONDecodeError:
+                                current_tool_step.input = {"error": "Invalid JSON arguments", "args": func_args}
+
+                            if func_output is not None:
+                                try:
+                                    current_tool_step.output = json.loads(func_output)
+                                except json.JSONDecodeError:
+                                    current_tool_step.output = func_output # Treat as plain text
+                            else:
+                                current_tool_step.output = "No output from function." # Or handle as error
+
+                            await current_tool_step.send()
+            # Potentially handle other run_step.type like 'message_creation' if needed, though usually handled by on_text_xxx
+        except Exception as e:
+            print(f"Error in on_run_step_done: {e}")
+            # It's hard to show this error in the UI if the step itself is compromised. Logging is crucial.
+            # If a step was being built, try to mark it as error or send a general error.
+            if self.current_step and self.current_step.output is None:
+                 self.current_step.output = f"Error processing run step: {e}"
+                 self.current_step.is_error = True
+                 try:
+                     await self.current_step.update() # or send if not yet sent
+                 except Exception as step_update_e:
+                     print(f"Error updating step with error state in on_run_step_done: {step_update_e}")
 
 
     async def on_image_file_done(self, image_file):
         image_id = image_file.file_id
-        response = await async_openai_client.files.with_raw_response.content(image_id)
-        image_element = cl.Image(
-            name=image_id,
-            content=response.content,
-            display="inline",
-            size="large"
-        )
-        if not self.current_message.elements:
-            self.current_message.elements = []
-        self.current_message.elements.append(image_element)
-        await self.current_message.update()
-
+        try:
+            response = await async_openai_client.files.with_raw_response.content(image_id)
+            image_element = cl.Image(
+                name=image_id,
+                content=response.content,
+                display="inline",
+                size="large"
+            )
+            if not self.current_message.elements:
+                self.current_message.elements = []
+            self.current_message.elements.append(image_element)
+            await self.current_message.update()
+        except openai.APIError as e:
+            print(f"OpenAI API Error fetching image content for {image_id}: {e}")
+            if self.current_message:
+                self.current_message.content = f"Error displaying image {image_id}. Details: {e}"
+                await self.current_message.update()
+            else:
+                # This case might be less common if on_image_file_done is usually tied to a message
+                await cl.ErrorMessage(content=f"Failed to load image {image_id}. Details: {e}").send()
+        except Exception as e:
+            print(f"Unexpected error in on_image_file_done for {image_id}: {e}")
+            if self.current_message:
+                self.current_message.content = f"Unexpected error displaying image {image_id}."
+                await self.current_message.update()
+            else:
+                await cl.ErrorMessage(content=f"Unexpected error loading image {image_id}.").send()
 
 
 @cl.step(type="tool")
 async def speech_to_text(audio_file):
-    response = await async_openai_client.audio.transcriptions.create(
-        model="whisper-1", file=audio_file
-    )
-
-    return response.text
-
+    try:
+        response = await async_openai_client.audio.transcriptions.create(
+            model="whisper-1", file=audio_file
+        )
+        return response.text
+    except openai.APIError as e:
+        print(f"OpenAI API Error during speech to text: {e}")
+        raise # Re-raise to be handled by the caller
+    except Exception as e:
+        print(f"Unexpected error during speech to text: {e}")
+        raise # Re-raise to be handled by the caller
 
 async def upload_files(files: List[Element]):
     file_ids = []
-    for file in files:
-        uploaded_file = await async_openai_client.files.create(
-            file=Path(file.path), purpose="assistants"
-        )
-        file_ids.append(uploaded_file.id)
+    errors = []
+    for file_idx, file in enumerate(files):
+        try:
+            uploaded_file = await async_openai_client.files.create(
+                file=Path(file.path), purpose="assistants"
+            )
+            file_ids.append(uploaded_file.id)
+        except openai.APIError as e:
+            print(f"OpenAI API Error uploading file {file.name or f'file_{file_idx}'}: {e}")
+            errors.append({"file_name": file.name or f'file_{file_idx}', "error": str(e)})
+        except Exception as e:
+            print(f"Error processing file {file.name or f'file_{file_idx}'} for upload: {e}")
+            errors.append({"file_name": file.name or f'file_{file_idx}', "error": str(e)})
+
+    if errors:
+        error_messages = [f"{err['file_name']}: {err['error']}" for err in errors]
+        # It's better to raise a custom exception or handle this more gracefully
+        # For now, raising a general exception with a summary
+        raise Exception(f"Failed to upload some files: {'; '.join(error_messages)}")
     return file_ids
 
 
@@ -254,34 +386,62 @@ async def process_files(files: List[Element]):
 
 @cl.on_chat_start
 async def start_chat():
-    # Create a Thread
-    thread = await async_openai_client.beta.threads.create()
-    # Store thread ID in user session for later use
-    cl.user_session.set("thread_id", thread.id)
-
-    
+    try:
+        # Create a Thread
+        thread = await async_openai_client.beta.threads.create()
+        # Store thread ID in user session for later use
+        cl.user_session.set("thread_id", thread.id)
+    except openai.APIError as e:
+        print(f"OpenAI API Error on chat start (thread creation): {e}")
+        await cl.ErrorMessage(content=f"Failed to start chat. OpenAI API Error: {e}. Please try again later.").send()
+    except Exception as e:
+        print(f"Unexpected error on chat start: {e}")
+        await cl.ErrorMessage(content=f"An unexpected error occurred while starting the chat: {e}.").send()
 
 @cl.on_message
 async def main(message: cl.Message):
+    if not assistant:
+        await cl.ErrorMessage(content="The Assistant is not available due to an earlier initialization error. Please check server logs.").send()
+        return
+
     thread_id = cl.user_session.get("thread_id")
+    if not thread_id:
+        # This case can happen if start_chat failed to set the thread_id
+        await cl.ErrorMessage(content="Chat session not properly initialized. Please refresh and try again.").send()
+        return
 
-    attachments = await process_files(message.elements)
+    try:
+        attachments = await process_files(message.elements)
 
-    # Add a Message to the Thread
-    oai_message = await async_openai_client.beta.threads.messages.create(
-        thread_id=thread_id,
-        role="user",
-        content=message.content,
-        attachments=attachments,
-    )
+        # Add a Message to the Thread
+        oai_message = await async_openai_client.beta.threads.messages.create(
+            thread_id=thread_id,
+            role="user",
+            content=message.content,
+            attachments=attachments,
+        )
 
-    # Create and Stream a Run
-    async with async_openai_client.beta.threads.runs.stream(
-        thread_id=thread_id,
-        assistant_id=assistant.id,
-        event_handler=EventHandler(assistant_name=assistant.name),
-    ) as stream:
-        await stream.until_done()
+        # Create and Stream a Run
+        # Ensure assistant.id and assistant.name are accessed only if assistant is not None
+        if assistant and assistant.id and assistant.name:
+            async with async_openai_client.beta.threads.runs.stream(
+                thread_id=thread_id,
+                assistant_id=assistant.id,
+                event_handler=EventHandler(assistant_name=assistant.name),
+            ) as stream:
+                await stream.until_done()
+        else:
+            # This should ideally not be reached if the top check for assistant works,
+            # but as a safeguard:
+            await cl.ErrorMessage(content="Assistant configuration is missing. Cannot process message.").send()
+            return
+
+    except openai.APIError as e:
+        print(f"OpenAI API Error in main message processing: {e}")
+        await cl.ErrorMessage(content=f"An error occurred with the OpenAI API while processing your message: {e}.").send()
+    except Exception as e: # Catch other errors, like from process_files if it raises one
+        print(f"Error in main message processing: {e}")
+        await cl.ErrorMessage(content=f"An unexpected error occurred: {e}.").send()
 
 
 @cl.on_audio_chunk
@@ -317,13 +477,23 @@ async def on_audio_end(elements: list[Element]):
     ).send()
 
     whisper_input = (audio_buffer.name, audio_file, audio_mime_type)
-    transcription = await speech_to_text(whisper_input)
-
-    msg = cl.Message(author="You", content=transcription, elements=elements)
-
-    await main(message=msg)
+    try:
+        transcription = await speech_to_text(whisper_input)
+        msg = cl.Message(author="You", content=transcription, elements=elements)
+        await main(message=msg)
+    except openai.APIError as e:
+        # Error is already logged by speech_to_text
+        await cl.ErrorMessage(content=f"Failed to transcribe audio due to OpenAI API error: {e}. Please try again.").send()
+    except Exception as e:
+        # For other exceptions re-raised by speech_to_text or new ones here
+        print(f"Error in on_audio_end: {e}")
+        await cl.ErrorMessage(content=f"An unexpected error occurred during audio processing: {e}.").send()
 
 
 if __name__ == "__main__":
     from chainlit.cli import run_chainlit
+    # Check if assistant was loaded before running Chainlit, though Chainlit's run controls the main loop.
+    # This is more of a warning for the developer.
+    if not assistant:
+        print("Warning: OpenAI Assistant could not be initialized. Chainlit app might not work as expected.")
     run_chainlit(__file__)
